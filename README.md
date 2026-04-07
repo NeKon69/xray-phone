@@ -89,7 +89,7 @@ Build and install the debug APK:
 JAVA_HOME="/usr/lib/jvm/java-17-openjdk" \
 ANDROID_HOME="/opt/android-sdk" \
 ANDROID_SDK_ROOT="/opt/android-sdk" \
-gradle assembleDebug
+bash ./build-app.sh debug
 
 adb install --no-streaming -r app/build/outputs/apk/debug/app-debug.apk
 ```
@@ -198,13 +198,19 @@ then the app should start the VPN on boot, often very early.
 Debug build:
 
 ```bash
-gradle assembleDebug
+bash ./build-app.sh debug
 ```
 
 Release build:
 
 ```bash
-gradle assembleRelease
+bash ./build-app.sh release
+```
+
+Dependency fetch only:
+
+```bash
+bash ./fetch-deps.sh
 ```
 
 Current release output is:
@@ -216,6 +222,8 @@ app/build/outputs/apk/release/app-release-unsigned.apk
 That file is unsigned, so it is not a normal installable release APK yet.
 
 `setup-phone.sh` prefers a signed release APK automatically if one exists. If there is no signed release build, it falls back to the installable debug APK.
+
+The repo does not keep `libv2ray.aar` checked in anymore. `build-app.sh` pulls it first through `fetch-deps.sh`.
 
 ## Reuse On Another Phone
 
