@@ -1,0 +1,328 @@
+#!/data/data/com.termux/files/usr/bin/bash
+
+set -eu
+
+COMMANDS="pair on off status logs follow load validate info doctor watch diag which help exit quit prepare autostart"
+APP_ID="dev.xrayphone"
+RECEIVER="$APP_ID/.control.ControlReceiver"
+PREPARE_ACTIVITY="$APP_ID/.ui.PrepareVpnActivity"
+DEFAULT_CONFIG="$HOME/cfg.json"
+XRAY_BIN="${XRAY_BIN:-$(command -v xray 2>/dev/null || true)}"
+LOG_TAG="XrayPhone"
+CONFIG_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}"
+TOKEN_DIR="$CONFIG_ROOT/xrayctl"
+TOKEN_FILE="$TOKEN_DIR/token"
+ACTION_PREFIX="$APP_ID.action"
+ACTION_PAIR="$ACTION_PREFIX.PAIR"
+ACTION_SYNC_CONFIG="$ACTION_PREFIX.SYNC_CONFIG"
+ACTION_START="$ACTION_PREFIX.ON"
+ACTION_STOP="$ACTION_PREFIX.OFF"
+ACTION_STATUS="$ACTION_PREFIX.STATUS"
+ACTION_SET_AUTOSTART="$ACTION_PREFIX.SET_AUTOSTART"
+ACTION_INFO="$ACTION_PREFIX.INFO"
+ACTION_DIAG="$ACTION_PREFIX.DIAG"
+
+am_cmd() {
+  /system/bin/am "$@"
+}
+
+broadcast() {
+  am_cmd broadcast --user 0 -n "$RECEIVER" "$@"
+}
+
+token_path() {
+  printf '%s\n' "$TOKEN_FILE"
+}
+
+read_token() {
+  if [ -f "$TOKEN_FILE" ]; then
+    IFS= read -r token < "$TOKEN_FILE"
+    printf '%s\n' "$token"
+  fi
+}
+
+save_token() {
+  mkdir -p "$TOKEN_DIR"
+  umask 077
+  printf '%s\n' "$1" > "$TOKEN_FILE"
+  chmod 600 "$TOKEN_FILE"
+}
+
+extract_token() {
+  output="$1"
+  token="${output#*data=\"token=}"
+  if [ "$token" = "$output" ]; then
+    return 1
+  fi
+
+  token="${token%%\"*}"
+  printf '%s\n' "$token"
+}
+
+pair_token() {
+  output="$(broadcast -a "$ACTION_PAIR")"
+  token="$(extract_token "$output")" || {
+    printf '%s\n' "$output" >&2
+    exit 1
+  }
+  save_token "$token"
+  printf 'paired token: %s\n' "$(token_path)"
+}
+
+require_token() {
+  token="$(read_token || true)"
+  if [ -z "$token" ]; then
+    pair_token >/dev/null
+    token="$(read_token || true)"
+  fi
+
+  if [ -z "$token" ]; then
+    printf 'missing control token, run: xrayctl pair\n' >&2
+    exit 2
+  fi
+
+  printf '%s\n' "$token"
+}
+
+require_file() {
+  if [ ! -f "$1" ]; then
+    printf 'File not found: %s\n' "$1" >&2
+    exit 2
+  fi
+}
+
+encode_file_base64() {
+  base64 < "$1" | tr -d '\n'
+}
+
+prepare_vpn() {
+  am_cmd start --user 0 -n "$PREPARE_ACTIVITY"
+}
+
+sync_config() {
+  config_path="${1:-$DEFAULT_CONFIG}"
+  require_file "$config_path"
+  config_b64="$(encode_file_base64 "$config_path")"
+  token="$(require_token)"
+  broadcast -a "$ACTION_SYNC_CONFIG" --es config_base64 "$config_b64" --es token "$token"
+}
+
+start_vpn() {
+  sync_config "$DEFAULT_CONFIG" >/dev/null
+  token="$(require_token)"
+  broadcast -a "$ACTION_START" --es token "$token"
+}
+
+stop_vpn() {
+  token="$(require_token)"
+  broadcast -a "$ACTION_STOP" --es token "$token"
+}
+
+status_vpn() {
+  token="$(require_token)"
+  broadcast -a "$ACTION_STATUS" --es token "$token"
+}
+
+info_vpn() {
+  token="$(require_token)"
+  broadcast -a "$ACTION_INFO" --es token "$token"
+}
+
+diag_vpn() {
+  token="$(require_token)"
+  broadcast -a "$ACTION_DIAG" --es token "$token"
+}
+
+set_autostart() {
+  case "${1:-}" in
+    on|true|1)
+      enabled=true
+      ;;
+    off|false|0)
+      enabled=false
+      ;;
+    *)
+      printf 'usage: xrayctl autostart <1|0>\n' >&2
+      exit 2
+      ;;
+  esac
+
+  token="$(require_token)"
+  broadcast -a "$ACTION_SET_AUTOSTART" --ez enabled "$enabled" --es token "$token"
+}
+
+show_logs() {
+  lines="${1:-100}"
+  /system/bin/logcat -d -t "$lines" -s "$LOG_TAG"
+}
+
+follow_logs() {
+  /system/bin/logcat -s "$LOG_TAG"
+}
+
+validate_config() {
+  config_path="${1:-$DEFAULT_CONFIG}"
+  require_file "$config_path"
+
+  if [ -z "$XRAY_BIN" ]; then
+    printf 'Validation unavailable: xray binary not found in PATH\n' >&2
+    exit 4
+  fi
+
+  "$XRAY_BIN" run -test -c "$config_path"
+}
+
+show_info() {
+  printf 'app_id:        %s\n' "$APP_ID"
+  printf 'receiver:      %s\n' "$RECEIVER"
+  printf 'prepare:       %s\n' "$PREPARE_ACTIVITY"
+  printf 'default_config:%s\n' "$DEFAULT_CONFIG"
+  printf 'xray_bin:      %s\n' "${XRAY_BIN:-missing}"
+  printf 'log_tag:       %s\n' "$LOG_TAG"
+  printf 'token_file:    %s\n' "$TOKEN_FILE"
+  printf '\n'
+  info_vpn
+}
+
+doctor() {
+  failures=0
+
+  if [ -n "$XRAY_BIN" ]; then
+    printf '[OK]   xray binary: %s\n' "$XRAY_BIN"
+  else
+    printf '[FAIL] xray binary: missing in PATH\n'
+    failures=$((failures + 1))
+  fi
+
+  if [ -f "$DEFAULT_CONFIG" ]; then
+    printf '[OK]   config exists: %s\n' "$DEFAULT_CONFIG"
+  else
+    printf '[FAIL] config exists: %s\n' "$DEFAULT_CONFIG"
+    failures=$((failures + 1))
+  fi
+
+  if /system/bin/pm path "$APP_ID" >/dev/null 2>&1; then
+    printf '[OK]   app installed: %s\n' "$APP_ID"
+  else
+    printf '[FAIL] app installed: %s\n' "$APP_ID"
+    failures=$((failures + 1))
+  fi
+
+  if [ -f "$TOKEN_FILE" ]; then
+    printf '[OK]   token file: %s\n' "$TOKEN_FILE"
+  else
+    printf '[WARN] token file: missing, will auto-pair on first command\n'
+  fi
+
+  printf '\n'
+  status_vpn || true
+
+  if [ "$failures" -ne 0 ]; then
+    exit 4
+  fi
+}
+
+watch_status() {
+  interval="${1:-1}"
+  while true; do
+    clear
+    printf 'xrayctl watch  interval=%ss\n\n' "$interval"
+    status_vpn || true
+    printf '\nRecent logs:\n'
+    show_logs 10 || true
+    sleep "$interval"
+  done
+}
+
+which_paths() {
+  printf 'app_id:         %s\n' "$APP_ID"
+  printf 'receiver:       %s\n' "$RECEIVER"
+  printf 'prepare:        %s\n' "$PREPARE_ACTIVITY"
+  printf 'default_config: %s\n' "$DEFAULT_CONFIG"
+  printf 'xray_bin:       %s\n' "${XRAY_BIN:-missing}"
+  printf 'token_file:     %s\n' "$TOKEN_FILE"
+}
+
+print_usage() {
+  cat <<EOF
+Commands:
+  pair               Pair Termux with the app and store a control token
+  on                 Sync default config and enable the phone VPN
+  off                Disable the phone VPN
+  status             Show phone VPN status
+  logs [N]           Show last N log lines (default 100)
+  follow             Follow app logs
+  load <path>        Sync config from path into the app
+  validate [path]    Validate config path or current default config
+  info               Deep runtime/app/config details
+  doctor             Health checks for app + config + xray
+  watch [seconds]    Live status dashboard with logs
+  diag               Non-sensitive VPN diagnostics from the app
+  which              Show important paths and app identifiers
+  prepare            Request Android VPN permission for the app
+  autostart 1|0      Toggle boot start inside the app
+  help               Show this help
+  exit|quit          No-op, kept for CLI compatibility
+EOF
+}
+
+command_name="${1:-help}"
+
+case "$command_name" in
+  pair)
+    pair_token
+    ;;
+  on)
+    start_vpn
+    ;;
+  off)
+    stop_vpn
+    ;;
+  status)
+    status_vpn
+    ;;
+  logs)
+    show_logs "${2:-100}"
+    ;;
+  follow)
+    follow_logs
+    ;;
+  load)
+    sync_config "${2:-$DEFAULT_CONFIG}"
+    ;;
+  validate)
+    validate_config "${2:-$DEFAULT_CONFIG}"
+    ;;
+  info)
+    show_info
+    ;;
+  doctor)
+    doctor
+    ;;
+  watch)
+    watch_status "${2:-1}"
+    ;;
+  diag)
+    diag_vpn
+    ;;
+  which)
+    which_paths
+    ;;
+  prepare)
+    prepare_vpn
+    ;;
+  autostart)
+    set_autostart "${2:-}"
+    ;;
+  help|-h|--help)
+    print_usage
+    ;;
+  exit|quit)
+    exit 0
+    ;;
+  *)
+    printf 'Unknown command: %s\n\n' "$command_name" >&2
+    print_usage >&2
+    exit 2
+    ;;
+esac

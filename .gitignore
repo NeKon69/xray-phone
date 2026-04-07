@@ -1,0 +1,15 @@
+/.gradle/
+/build/
+/app/build/
+/local.properties
+/.idea/
+/*.iml
+
+/_tmp_*/
+/_tmp_termux_base.apk
+
+*.log
+*.keystore
+*.jks
+
+.DS_Store

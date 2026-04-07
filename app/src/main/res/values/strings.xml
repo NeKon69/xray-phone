@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Xray Phone</string>
+    <string name="notif_channel_name">VPN</string>
+    <string name="notif_title">Xray Phone</string>
+    <string name="notif_text">VPN service is starting</string>
+</resources>
